@@ -1,0 +1,9 @@
+.env
+results.db
+results.db-journal
+results.db-wal
+results.db-shm
+views/
+__pycache__/
+*.pyc
+.claude/

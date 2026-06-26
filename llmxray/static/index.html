@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>llm-xray · compare</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e8ec; --muted: #9aa3b2; --accent: #4f8cff; --ok: #36c275;
+    --err: #ff5d5d; --warn: #f4b740;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .muted { color: var(--muted); font-size: 13px; }
+  main { padding: 20px; max-width: 1500px; margin: 0 auto; }
+  .composer {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 20px;
+  }
+  textarea {
+    width: 100%; min-height: 120px; resize: vertical; background: var(--panel2);
+    color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  input[type=text] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px; font-size: 14px; min-width: 220px;
+  }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .spacer { flex: 1; }
+  .status { color: var(--muted); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .card.error { border-color: #5a2a2a; }
+  .card-head {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); background: var(--panel2);
+  }
+  .card-head .model { font-weight: 600; font-size: 13px; word-break: break-all; }
+  .card-head .meta { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
+  .card-body { padding: 12px 14px; overflow-x: auto; }
+  .card-body :first-child { margin-top: 0; }
+  .card-body :last-child { margin-bottom: 0; }
+  .card-body pre {
+    background: var(--panel2); padding: 10px; border-radius: 6px; overflow-x: auto;
+  }
+  .card-body code { background: var(--panel2); padding: 1px 4px; border-radius: 4px; }
+  .card-body pre code { background: none; padding: 0; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; }
+  .badge.ok { background: rgba(54,194,117,.15); color: var(--ok); }
+  .badge.err { background: rgba(255,93,93,.15); color: var(--err); }
+  .badge.run { background: rgba(79,140,255,.15); color: var(--accent); }
+  .err-text { color: var(--err); font-family: ui-monospace, monospace; font-size: 13px; white-space: pre-wrap; }
+  .spinner {
+    width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); padding: 10px 16px;
+    border-radius: 8px; opacity: 0; transition: opacity .25s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+  nav.tabs { display: flex; gap: 4px; }
+  .tab {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    padding: 6px 12px; font-weight: 600; border-radius: 8px;
+  }
+  .tab.active { color: var(--text); background: var(--panel2); border-color: var(--border); }
+  .stored-item {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 10px; cursor: pointer; display: flex; gap: 12px; align-items: center;
+  }
+  .stored-item:hover { border-color: var(--accent); }
+  .stored-item .id { font-weight: 600; }
+  .stored-item .preview { color: var(--muted); font-size: 13px; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70ch; }
+  .stored-item .count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .promptbox {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 16px; white-space: pre-wrap;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>llm-xray</h1>
+  <nav class="tabs">
+    <button id="tabCompare" class="tab active">Compare</button>
+    <button id="tabBrowse" class="tab">Browse stored</button>
+  </nav>
+  <span class="muted" id="tagline">type a prompt → compare across all models → store the ones you want</span>
+</header>
+
+<main>
+ <section id="compareView">
+  <div class="composer">
+    <textarea id="prompt" placeholder="Write your prompt here..."></textarea>
+    <div class="row">
+      <button id="runBtn">▶ Run across all models</button>
+      <span id="modelCount" class="status"></span>
+      <span class="spacer"></span>
+      <input type="text" id="promptId" placeholder="prompt id (e.g. sea-haiku)" />
+      <button id="storeBtn" class="secondary" disabled>💾 Store selected to results</button>
+    </div>
+    <div class="row"><span id="status" class="status"></span></div>
+  </div>
+
+  <div id="grid" class="grid"></div>
+ </section>
+
+ <section id="browseView" style="display:none">
+  <div class="row" style="margin-bottom:14px">
+    <button id="refreshBrowse" class="secondary">↻ Refresh</button>
+    <span id="browseStatus" class="status"></span>
+    <span class="spacer"></span>
+    <button id="backToList" class="secondary" style="display:none">← All prompts</button>
+  </div>
+  <div id="storedList"></div>
+  <div id="storedDetail" style="display:none"></div>
+ </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let MODELS = [];
+const results = {};            // model -> result object (for storing)
+const $ = (id) => document.getElementById(id);
+
+marked.setOptions({ breaks: true });
+function md(text) {
+  try { return marked.parse(text || ""); }
+  catch { return "<pre>" + (text || "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])) + "</pre>"; }
+}
+
+function fmtMeta(r) {
+  const bits = [];
+  if (r.total_tokens != null) bits.push(r.total_tokens + " tok");
+  if (r.cost_usd != null) bits.push("$" + r.cost_usd.toFixed(5));
+  if (r.latency_ms != null) bits.push(r.latency_ms + " ms");
+  return bits.join(" · ");
+}
+
+function cardFor(model) {
+  const id = "card-" + btoa(model).replace(/=/g, "");
+  let el = $(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "card";
+    el.id = id;
+    $("grid").appendChild(el);
+  }
+  return el;
+}
+
+function renderPending(model) {
+  const el = cardFor(model);
+  el.className = "card";
+  el.innerHTML = `
+    <div class="card-head">
+      <span class="model">${model}</span>
+      <span class="meta"><span class="badge run">running</span></span>
+    </div>
+    <div class="card-body"><div class="spinner"></div></div>`;
+}
+
+function renderResult(r) {
+  const el = cardFor(r.model);
+  if (r.error) {
+    el.className = "card error";
+    el.innerHTML = `
+      <div class="card-head">
+        <span class="model">${r.model}</span>
+        <span class="meta"><span class="badge err">error</span></span>
+      </div>
+      <div class="card-body"><div class="err-text">${(r.error+"").replace(/</g,"&lt;")}</div></div>`;
+    return;
+  }
+  results[r.model] = r;
+  el.className = "card";
+  el.innerHTML = `
+    <div class="card-head">
+      <label class="chk"><input type="checkbox" class="storeChk" data-model="${r.model}" checked> store</label>
+      <span class="model">${r.model}</span>
+      <span class="meta">${fmtMeta(r)}</span>
+    </div>
+    <div class="card-body">${md(r.content)}</div>`;
+  updateStoreBtn();
+}
+
+function updateStoreBtn() {
+  const any = document.querySelectorAll(".storeChk:checked").length > 0;
+  $("storeBtn").disabled = !any;
+}
+
+async function loadConfig() {
+  const cfg = await (await fetch("/api/config")).json();
+  MODELS = cfg.models || [];
+  $("modelCount").textContent = MODELS.length + " models configured";
+}
+
+async function runAll() {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { toast("Enter a prompt first."); return; }
+  if (!MODELS.length) { toast("No models configured."); return; }
+
+  for (const k in results) delete results[k];
+  $("grid").innerHTML = "";
+  $("runBtn").disabled = true;
+  $("storeBtn").disabled = true;
+  let done = 0;
+  $("status").textContent = `Running 0/${MODELS.length}...`;
+
+  MODELS.forEach(renderPending);
+
+  await Promise.all(MODELS.map(async (model) => {
+    try {
+      const res = await fetch("/api/run-one", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ prompt, model })
+      });
+      const r = await res.json();
+      if (!r.model) r.model = model;
+      renderResult(r);
+    } catch (e) {
+      renderResult({ model, error: String(e) });
+    } finally {
+      done++;
+      $("status").textContent = `Running ${done}/${MODELS.length}...`;
+    }
+  }));
+
+  $("status").textContent = `Done. ${Object.keys(results).length} succeeded, ${MODELS.length - Object.keys(results).length} failed.`;
+  $("runBtn").disabled = false;
+}
+
+async function storeSelected() {
+  const prompt_text = $("prompt").value.trim();
+  const prompt_id = $("promptId").value.trim();
+  if (!prompt_id) { toast("Enter a prompt id to store under."); $("promptId").focus(); return; }
+  const chosen = [...document.querySelectorAll(".storeChk:checked")].map(c => results[c.dataset.model]).filter(Boolean);
+  if (!chosen.length) { toast("Nothing selected."); return; }
+
+  $("storeBtn").disabled = true;
+  const res = await fetch("/api/store", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ prompt_id, prompt_text, results: chosen })
+  });
+  const out = await res.json();
+  $("storeBtn").disabled = false;
+  if (out.error) { toast("Error: " + out.error); return; }
+  toast(`Stored ${out.stored} response(s) under "${out.prompt_id}"${out.new_prompt ? " (new prompt added)" : ""}.`);
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+// ---- Browse stored ----
+function switchTab(which) {
+  const compare = which === "compare";
+  $("tabCompare").classList.toggle("active", compare);
+  $("tabBrowse").classList.toggle("active", !compare);
+  $("compareView").style.display = compare ? "" : "none";
+  $("browseView").style.display = compare ? "none" : "";
+  $("tagline").textContent = compare
+    ? "type a prompt → compare across all models → store the ones you want"
+    : "every prompt you've stored, with all model responses";
+  if (!compare) loadStored();
+}
+
+async function loadStored() {
+  $("backToList").style.display = "none";
+  $("storedDetail").style.display = "none";
+  $("storedList").style.display = "";
+  $("browseStatus").textContent = "Loading...";
+  const data = await (await fetch("/api/stored")).json();
+  const items = data.items || [];
+  $("browseStatus").textContent = items.length ? `${items.length} stored prompt(s)` : "Nothing stored yet.";
+  $("storedList").innerHTML = items.map(it => `
+    <div class="stored-item" data-id="${encodeURIComponent(it.prompt_id)}">
+      <div>
+        <div class="id">${it.prompt_id}${it.title ? ' — ' + it.title : ''}</div>
+        <div class="preview">${(it.preview||"").replace(/</g,"&lt;")}</div>
+      </div>
+      <div class="count">${it.n} response(s)${it.errors ? ' · ' + it.errors + ' err' : ''}<br>${it.last_at||""}</div>
+    </div>`).join("");
+}
+
+async function showStoredDetail(pid) {
+  $("browseStatus").textContent = "Loading...";
+  const d = await (await fetch("/api/stored?id=" + encodeURIComponent(pid))).json();
+  $("storedList").style.display = "none";
+  $("backToList").style.display = "";
+  $("storedDetail").style.display = "";
+  $("browseStatus").textContent = d.prompt_id;
+  const cards = (d.responses||[]).map(r => {
+    if (r.error) {
+      return `<div class="card error"><div class="card-head"><span class="model">${r.model}</span>
+        <span class="meta"><span class="badge err">error</span></span></div>
+        <div class="card-body"><div class="err-text">${(r.error+"").replace(/</g,"&lt;")}</div></div></div>`;
+    }
+    const stale = r.stale ? ' <span class="badge err">stale</span>' : '';
+    const src = r.source === 'manual' ? ' <span class="badge run">manual</span>' : '';
+    return `<div class="card"><div class="card-head"><span class="model">${r.model}</span>${src}${stale}
+      <span class="meta">${fmtMeta(r)}</span></div>
+      <div class="card-body">${md(r.content)}</div></div>`;
+  }).join("");
+  $("storedDetail").innerHTML = `
+    <h2 style="margin:0 0 4px">${d.prompt_id}${d.title ? ' — ' + d.title : ''}</h2>
+    <div class="promptbox">${(d.prompt_text||"").replace(/</g,"&lt;")}</div>
+    <div class="grid">${cards || '<p class="status">No responses.</p>'}</div>`;
+}
+
+$("tabCompare").addEventListener("click", () => switchTab("compare"));
+$("tabBrowse").addEventListener("click", () => switchTab("browse"));
+$("refreshBrowse").addEventListener("click", loadStored);
+$("backToList").addEventListener("click", loadStored);
+$("storedList").addEventListener("click", (e) => {
+  const item = e.target.closest(".stored-item");
+  if (item) showStoredDetail(decodeURIComponent(item.dataset.id));
+});
+
+$("runBtn").addEventListener("click", runAll);
+$("storeBtn").addEventListener("click", storeSelected);
+$("grid").addEventListener("change", (e) => { if (e.target.classList.contains("storeChk")) updateStoreBtn(); });
+$("prompt").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") runAll();
+});
+loadConfig();
+</script>
+</body>
+</html>
