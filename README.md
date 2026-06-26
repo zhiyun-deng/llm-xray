@@ -1,12 +1,15 @@
 # llm-xray
 
-**See how different LLMs answer the same prompt — side by side.**
+A tiny, dependency-free tool to run a series of prompts against several models
+(via [OpenRouter](https://openrouter.ai)) and store every response in one place
+for easy side-by-side comparison.
 
-`llm-xray` runs a prompt (or a whole series of them) across many models via
-[OpenRouter](https://openrouter.ai), stores every response with its cost and
-token usage, and lets you compare them in a clean local web UI or as generated
-markdown. Think of it as an X-ray for model behavior: one prompt in, every
-model's answer laid out next to each other.
+It does two things:
+
+- **Compare** — send one prompt to many models at once and see their answers laid
+  out next to each other, rendered as markdown.
+- **Store** — keep every response (with cost and token usage) in a single file you
+  can browse and revisit any time.
 
 > Why not a spreadsheet? LLM answers are long, multi-paragraph markdown —
 > miserable inside a cell. `llm-xray` keeps the full responses readable and the
@@ -14,16 +17,16 @@ model's answer laid out next to each other.
 
 ## Features
 
-- 🚀 **One prompt → every model, in parallel** via OpenRouter (hundreds of models).
-- 🖥️ **Local web UI** — type a prompt, watch each model answer in its own card
+- **One prompt, every model, in parallel** via OpenRouter (hundreds of models).
+- **Local web UI** — type a prompt, watch each model answer in its own card
   with rendered markdown, then save the ones you like with one click.
-- 🗂️ **Single-file storage** — every response + token/cost/latency lives in one
+- **Single-file storage** — every response + token/cost/latency lives in one
   SQLite file (`results.db`), not a thousand loose files.
-- 🔎 **Browse past runs** — revisit any stored prompt and compare all answers.
-- ✍️ **Manual responses too** — paste in answers from models not on OpenRouter.
-- 🏷️ **Stale detection** — flags responses captured before you edited the prompt.
-- 💵 **Cost tracking** — per-response and per-model token/cost totals.
-- 📦 **Zero dependencies** — pure Python standard library. No `pip install`.
+- **Browse past runs** — revisit any stored prompt and compare all answers.
+- **Manual responses too** — paste in answers from models not on OpenRouter.
+- **Stale detection** — flags responses captured before you edited the prompt.
+- **Cost tracking** — per-response and per-model token/cost totals.
+- **Zero dependencies** — pure Python standard library. No `pip install`.
 
 ## Quick start
 
@@ -89,17 +92,45 @@ Prefer the terminal? Every UI action has a command (`python3 -m llmxray <cmd>`):
 | `catalog` | Refresh `models.txt` with the live OpenRouter model list. |
 | `prompts` / `models` | List configured prompts / models. |
 
-```bash
-# Run everything in config.json, then read it back
-python3 -m llmxray run
-python3 -m llmxray view sea-haiku --stdout
-python3 -m llmxray stats
+### Run the comparison
 
-# Smoke test: first 3 prompts, two models, 8 parallel requests
+```bash
+# Everything (all prompts × all models in config.json)
+python3 -m llmxray run
+
+# A quick smoke test: first 3 prompts, two models, 8 parallel requests
 python3 -m llmxray run --limit 3 --models "openai/gpt-5.5,anthropic/claude-opus-4.8" --workers 8
 
-# Re-run one prompt across all models, overwriting old answers
+# Re-run a single prompt across all models, overwriting old answers
 python3 -m llmxray run --prompts sea-haiku --force
+```
+
+### Add a response manually
+
+For models not on OpenRouter, or answers gathered elsewhere:
+
+```bash
+python3 -m llmxray add --prompt sea-haiku --model "some/model" --file answer.md
+cat answer.md | python3 -m llmxray add --prompt sea-haiku --model "some/model" --stdin
+python3 -m llmxray add --prompt sea-haiku --model "some/model"   # opens $EDITOR
+```
+
+### Read the results
+
+```bash
+python3 -m llmxray view sea-haiku            # writes views/sea-haiku.md
+python3 -m llmxray view sea-haiku --stdout   # print to terminal
+python3 -m llmxray view --all                # one file per prompt in views/
+```
+
+Each view shows the prompt followed by every model's response with a metadata line,
+and flags any response as **STALE** if the prompt text changed after it was captured.
+
+### Check progress / cost
+
+```bash
+python3 -m llmxray status   # legend: # ok  ~ stale  E error  . missing
+python3 -m llmxray stats    # per-model tokens, cost, avg latency
 ```
 
 ## How it fits together
