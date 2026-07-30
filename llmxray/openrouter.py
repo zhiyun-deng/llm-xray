@@ -19,10 +19,35 @@ class ChatResult:
     finish_reason: str | None
     latency_ms: int
     raw: dict
+    # Reasoning ("thinking") signals. reasoning_tokens is the ground truth for
+    # whether the model actually reasoned: it is None when the provider reports
+    # no token breakdown, 0 when it reasoned not at all.
+    reasoning_tokens: int | None = None
+    reasoning_text: str = ""
 
 
 class OpenRouterError(Exception):
     pass
+
+
+def _reasoning_text(message: dict) -> str:
+    """Pull whatever reasoning trace the provider returned out of a message.
+
+    Providers differ: newer responses carry a `reasoning_details` array of
+    typed parts, older ones a flat `reasoning` string. Encrypted parts have no
+    readable text, so a model can reason with a non-zero token count and still
+    return nothing here — always trust reasoning_tokens over this.
+    """
+    parts: list[str] = []
+    for part in message.get("reasoning_details") or []:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text") or part.get("summary") or ""
+        if text:
+            parts.append(str(text))
+    if parts:
+        return "\n\n".join(parts)
+    return str(message.get("reasoning") or "")
 
 
 class OpenRouterClient:
@@ -49,7 +74,17 @@ class OpenRouterClient:
         system: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        reasoning: dict | None = None,
     ) -> ChatResult:
+        """Send one chat completion.
+
+        `reasoning` is OpenRouter's unified reasoning object, passed through
+        verbatim: {"enabled": true} turns thinking on at the provider default,
+        {"effort": "high"} works on OpenAI/Grok, {"max_tokens": N} on
+        Anthropic/Gemini, and {"exclude": true} reasons without returning the
+        trace. Omitting it entirely (None) sends no reasoning field at all,
+        which leaves each model on its own default.
+        """
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -63,6 +98,8 @@ class OpenRouterClient:
             # Ask OpenRouter to include cost/usage in the response.
             "usage": {"include": True},
         }
+        if reasoning is not None:
+            body["reasoning"] = reasoning
         payload = json.dumps(body).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -111,12 +148,14 @@ class OpenRouterClient:
             raise OpenRouterError(str(msg))
         try:
             choice = raw["choices"][0]
-            content = choice["message"]["content"]
+            message = choice["message"]
+            content = message["content"]
             finish = choice.get("finish_reason")
         except (KeyError, IndexError, TypeError) as e:
             raise OpenRouterError(f"Unexpected response shape: {json.dumps(raw)[:500]}") from e
 
         usage = raw.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
         return ChatResult(
             content=content or "",
             prompt_tokens=usage.get("prompt_tokens"),
@@ -126,4 +165,6 @@ class OpenRouterClient:
             finish_reason=finish,
             latency_ms=latency_ms,
             raw=raw,
+            reasoning_tokens=details.get("reasoning_tokens"),
+            reasoning_text=_reasoning_text(message),
         )

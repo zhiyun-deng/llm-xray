@@ -19,6 +19,28 @@ def fetch_models() -> list[dict]:
         return json.load(resp)["data"]
 
 
+def fetch_reasoning_meta(models: list[str] | None = None) -> dict[str, dict | None]:
+    """Return each model's `reasoning` capability object from /models.
+
+    Shape (any key may be absent):
+      mandatory          — reasoning cannot be disabled; never send effort:none
+      default_enabled    — whether it reasons when you send nothing
+      default_effort     — effort to pre-select when enabling ("none" = off)
+      supported_efforts  — allowed efforts, highest first. null = all accepted,
+                           absent = model exposes no effort selection
+      supports_max_tokens— accepts a token budget instead of/alongside effort
+
+    A value of None means the model declares no reasoning support at all.
+    """
+    wanted = set(models) if models else None
+    out: dict[str, dict | None] = {}
+    for m in fetch_models():
+        if wanted is None or m["id"] in wanted:
+            meta = m.get("reasoning")
+            out[m["id"]] = meta if isinstance(meta, dict) else None
+    return out
+
+
 def _per_million(value) -> float:
     try:
         return float(value or 0) * 1_000_000

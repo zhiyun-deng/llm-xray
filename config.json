@@ -14,8 +14,10 @@
   "defaults": {
     "temperature": 0.7,
     "max_tokens": 2048,
-    "system": null
+    "system": null,
+    "reasoning": null
   },
+  "reasoning_by_model": {},
   "run": {
     "workers": 4,
     "max_retries": 4,

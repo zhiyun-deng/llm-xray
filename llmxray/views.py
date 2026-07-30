@@ -17,6 +17,9 @@ def _meta_line(row) -> str:
     bits = [f"_source: {row['source']}_"]
     if row["total_tokens"] is not None:
         bits.append(f"tokens: {row['total_tokens']}")
+    # Present only on rows captured after reasoning support was added.
+    if "reasoning_tokens" in row.keys() and row["reasoning_tokens"] is not None:
+        bits.append(f"thinking: {row['reasoning_tokens']}")
     if row["cost_usd"] is not None:
         bits.append(f"cost: ${row['cost_usd']:.5f}")
     if row["latency_ms"] is not None:

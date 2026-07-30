@@ -17,11 +17,52 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .config import get_api_key, load_config
+from .config import REASONING_EFFORTS, get_api_key, load_config, resolve_reasoning
 from .openrouter import OpenRouterClient, OpenRouterError
 from .prompts import append_prompt, load_prompt_map, prompt_hash
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Full API payloads keyed by (model, prompt_hash). The browser only round-trips
+# display fields, so the raw JSON and reasoning trace would otherwise be lost
+# between /api/run-one and /api/store.
+_RAW_CACHE: dict[tuple[str, str], dict] = {}
+_RAW_CACHE_MAX = 200
+
+
+def _clean_reasoning(value, meta: dict | None = None) -> dict | None:
+    """Validate a reasoning object arriving from the browser.
+
+    Returns None for "send no reasoning field". Unknown keys and out-of-range
+    values are dropped here so a typo surfaces as local behaviour rather than
+    an opaque 400 from the provider. When the model's capability object is
+    known, effort is also checked against it — notably, a mandatory-reasoning
+    model never gets effort:none, which it would reject outright.
+    """
+    if not isinstance(value, dict):
+        return None
+    meta = meta or {}
+    allowed = meta.get("supported_efforts")
+    out: dict = {}
+    effort = value.get("effort")
+    if isinstance(effort, str) and effort in REASONING_EFFORTS:
+        mandatory_off = effort == "none" and meta.get("mandatory") is True
+        unsupported = isinstance(allowed, list) and effort not in allowed
+        if not mandatory_off and not unsupported:
+            out["effort"] = effort
+    budget = value.get("max_tokens")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+        out["max_tokens"] = int(budget)
+    # enabled:false is a real instruction ("turn thinking off") for models that
+    # don't list effort:none, so it must survive even though it is falsy.
+    if value.get("enabled") is False:
+        if meta.get("mandatory") is not True:   # mandatory models reject disabling
+            out["enabled"] = False
+    elif value.get("enabled") is True and "effort" not in out and "max_tokens" not in out:
+        out["enabled"] = True
+    if value.get("exclude") is True:
+        out["exclude"] = True
+    return out or None
 
 
 def _make_client(cfg: dict) -> OpenRouterClient:
@@ -38,6 +79,10 @@ def _make_client(cfg: dict) -> OpenRouterClient:
 class Handler(BaseHTTPRequestHandler):
     cfg: dict = {}
     client: OpenRouterClient | None = None
+    # model -> reasoning capability object from /models (or None). Fetched once
+    # at startup; empty if that lookup failed, which makes the UI fall back to
+    # offering every gateway effort.
+    reasoning_meta: dict = {}
 
     # -- helpers ---------------------------------------------------------- #
     def _send_json(self, obj, status: int = 200) -> None:
@@ -72,7 +117,17 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
         elif path == "/api/config":
-            self._send_json({"models": self.cfg.get("models", [])})
+            models = self.cfg.get("models", [])
+            self._send_json({
+                "models": models,
+                # What config.json would send today, so the controls open
+                # showing the real current state rather than a guess.
+                "reasoning": {m: resolve_reasoning(self.cfg, m) for m in models},
+                # Per-model capabilities, so the UI only offers what each
+                # model accepts instead of a generic list.
+                "reasoning_meta": {m: self.reasoning_meta.get(m) for m in models},
+                "efforts": list(REASONING_EFFORTS),
+            })
         elif path == "/api/stored":
             qs = parse_qs(parsed.query)
             pid = (qs.get("id") or [None])[0]
@@ -122,6 +177,9 @@ class Handler(BaseHTTPRequestHandler):
                 "cost_usd": r["cost_usd"],
                 "latency_ms": r["latency_ms"],
                 "finish_reason": r["finish_reason"],
+                "reasoning_tokens": r["reasoning_tokens"],
+                "reasoning": r["reasoning"],
+                "reasoning_config": r["reasoning_config"],
                 "error": r["error"],
                 "created_at": r["created_at"],
                 "stale": bool(cur_hash and r["prompt_hash"] and r["prompt_hash"] != cur_hash),
@@ -152,6 +210,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "prompt and model are required"}, status=400)
             return
         defaults = self.cfg.get("defaults", {})
+        # An explicit "reasoning" key wins, including a null meaning "send
+        # nothing". Absent entirely, fall back to config.json.
+        if "reasoning" in data:
+            reasoning = _clean_reasoning(data.get("reasoning"), self.reasoning_meta.get(model))
+        else:
+            reasoning = resolve_reasoning(self.cfg, model)
         try:
             res = self.client.chat(
                 model=model,
@@ -159,10 +223,22 @@ class Handler(BaseHTTPRequestHandler):
                 system=defaults.get("system"),
                 temperature=defaults.get("temperature", 0.7),
                 max_tokens=defaults.get("max_tokens", 2048),
+                reasoning=reasoning,
             )
         except OpenRouterError as e:
             self._send_json({"model": model, "error": str(e)})
             return
+
+        # Stash what the browser can't carry, so /api/store can persist it.
+        if len(_RAW_CACHE) > _RAW_CACHE_MAX:
+            _RAW_CACHE.clear()
+        _RAW_CACHE[(model, prompt_hash(prompt))] = {
+            "raw": res.raw,
+            "reasoning_tokens": res.reasoning_tokens,
+            "reasoning": res.reasoning_text or None,
+            "reasoning_config": reasoning,
+        }
+
         self._send_json({
             "model": model,
             "content": res.content,
@@ -172,6 +248,9 @@ class Handler(BaseHTTPRequestHandler):
             "cost_usd": res.cost_usd,
             "latency_ms": res.latency_ms,
             "finish_reason": res.finish_reason,
+            "reasoning_tokens": res.reasoning_tokens,
+            "reasoning": res.reasoning_text or None,
+            "reasoning_config": reasoning,
             "error": None,
         })
 
@@ -198,6 +277,8 @@ class Handler(BaseHTTPRequestHandler):
         for r in results:
             if r.get("error"):
                 continue
+            extra = _RAW_CACHE.get((r["model"], phash), {})
+            cfg_sent = extra.get("reasoning_config")
             db.upsert_response(
                 conn,
                 prompt_id=pid,
@@ -212,6 +293,10 @@ class Handler(BaseHTTPRequestHandler):
                 latency_ms=r.get("latency_ms"),
                 finish_reason=r.get("finish_reason"),
                 error=None,
+                raw_json=json.dumps(extra["raw"]) if extra.get("raw") else None,
+                reasoning_tokens=extra.get("reasoning_tokens", r.get("reasoning_tokens")),
+                reasoning=extra.get("reasoning", r.get("reasoning")),
+                reasoning_config=json.dumps(cfg_sent) if cfg_sent is not None else None,
             )
             stored += 1
         self._send_json({"stored": stored, "prompt_id": pid, "new_prompt": created})
@@ -221,6 +306,19 @@ def serve(port: int = 8000, open_browser: bool = True) -> None:
     cfg = load_config()
     Handler.cfg = cfg
     Handler.client = _make_client(cfg)  # validates the API key up front
+
+    # Reasoning capabilities drive the UI controls. A failure here is not fatal:
+    # the UI falls back to offering every gateway effort level.
+    from .catalog import fetch_reasoning_meta
+    try:
+        Handler.reasoning_meta = fetch_reasoning_meta(cfg.get("models", []))
+        declared = sum(1 for v in Handler.reasoning_meta.values() if v)
+        print(f"Reasoning capabilities loaded for {declared} of "
+              f"{len(cfg.get('models', []))} configured model(s).")
+    except Exception as e:  # noqa: BLE001 - offline / bad key shouldn't block the UI
+        Handler.reasoning_meta = {}
+        print(f"Could not load reasoning capabilities ({type(e).__name__}); "
+              "showing all effort levels.")
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}"
     print(f"llm-xray UI running at {url}  (Ctrl-C to stop)")

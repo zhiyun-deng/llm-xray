@@ -22,9 +22,29 @@ _DEFAULT_CONFIG = {
         "title": "llm-xray compare",
     },
     "models": [],
-    "defaults": {"temperature": 0.7, "max_tokens": 2048, "system": None},
+    "defaults": {"temperature": 0.7, "max_tokens": 2048, "system": None, "reasoning": None},
+    # Per-model reasoning overrides, keyed by model id. Wins over
+    # defaults.reasoning; set a model to null to leave it on its own default.
+    "reasoning_by_model": {},
     "run": {"workers": 4, "max_retries": 4, "timeout_seconds": 120},
 }
+
+# OpenRouter's effort ladder, weakest to strongest. "none" asks for no thinking.
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def resolve_reasoning(cfg: dict, model: str) -> dict | None:
+    """Return the reasoning object to send for `model`, or None to send nothing.
+
+    Precedence: reasoning_by_model[model] > defaults.reasoning > None. A model
+    listed in reasoning_by_model with an explicit null means "send nothing for
+    this one", which is how you keep one model on its default while forcing
+    others on.
+    """
+    by_model = cfg.get("reasoning_by_model") or {}
+    if model in by_model:
+        return by_model[model]
+    return (cfg.get("defaults") or {}).get("reasoning")
 
 
 def load_env(path: Path = ENV_PATH) -> None:

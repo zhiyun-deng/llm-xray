@@ -30,11 +30,30 @@ CREATE TABLE IF NOT EXISTS responses (
     error             TEXT,                                   -- set if the call failed
     created_at        TEXT    NOT NULL,
     raw_json          TEXT,                                   -- full API payload (auto only)
+    reasoning_tokens  INTEGER,                                -- thinking tokens billed as output
+    reasoning         TEXT,                                   -- trace, when the provider returns one
+    reasoning_config  TEXT,                                   -- the reasoning object we sent (JSON)
     UNIQUE(prompt_id, model)
 );
 CREATE INDEX IF NOT EXISTS idx_responses_prompt ON responses(prompt_id);
 CREATE INDEX IF NOT EXISTS idx_responses_model  ON responses(model);
 """
+
+# Columns added after the first release; existing results.db files predate them.
+_MIGRATIONS = (
+    ("reasoning_tokens", "INTEGER"),
+    ("reasoning", "TEXT"),
+    ("reasoning_config", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from an older results.db, preserving its rows."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(responses)")}
+    for name, decl in _MIGRATIONS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE responses ADD COLUMN {name} {decl}")
+    conn.commit()
 
 
 def now_iso() -> str:
@@ -45,6 +64,7 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
 
 

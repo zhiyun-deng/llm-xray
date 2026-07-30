@@ -90,6 +90,7 @@ Prefer the terminal? Every UI action has a command (`python3 -m llmxray <cmd>`):
 | `view` | Generate the markdown comparison for a prompt (or `--all`). |
 | `stats` | Token and cost totals per model. |
 | `catalog` | Refresh `models.txt` with the live OpenRouter model list. |
+| `probe` | Test which models reason ("think") by default, and whether it can be toggled. |
 | `prompts` / `models` | List configured prompts / models. |
 
 ### Run the comparison
@@ -104,6 +105,43 @@ python3 -m llmxray run --limit 3 --models "openai/gpt-5.5,anthropic/claude-opus-
 # Re-run a single prompt across all models, overwriting old answers
 python3 -m llmxray run --prompts sea-haiku --force
 ```
+
+### Reasoning ("thinking")
+
+Models differ on whether they think by default, which makes a raw comparison
+unfair — you can end up comparing a reasoning model against a non-reasoning
+one. `probe` calls each model three ways (parameter unset / forced on / forced
+off) and reports what actually happened, read from
+`usage.completion_tokens_details.reasoning_tokens`:
+
+```bash
+python3 -m llmxray probe                      # all configured models
+python3 -m llmxray probe --arms default       # just "what does it do normally?"
+```
+
+Then control it per run, or pin it per model in `config.json`:
+
+```bash
+python3 -m llmxray run --reasoning                    # on, provider default effort
+python3 -m llmxray run --reasoning-effort high        # OpenAI / Grok style
+python3 -m llmxray run --reasoning-max-tokens 4096    # Anthropic / Gemini style
+python3 -m llmxray run --no-reasoning                 # ask for none (some ignore it)
+```
+
+```json
+"defaults":   { "reasoning": { "effort": "medium" } },
+"reasoning_by_model": {
+  "anthropic/claude-opus-4.8": { "max_tokens": 4096 },
+  "deepseek/deepseek-v4-pro":  { "effort": "high" },
+  "openai/gpt-5.5":            null
+}
+```
+
+`reasoning_by_model` wins over `defaults.reasoning`; an explicit `null` means
+"send nothing for this model, leave it on its own default". CLI flags override
+both. Reasoning tokens are billed as output **and** count against
+`max_tokens` — if a thinking model returns `finish_reason: "length"` with a
+short answer, raise `defaults.max_tokens`.
 
 ### Add a response manually
 

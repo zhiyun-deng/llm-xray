@@ -19,6 +19,7 @@ def run(
     defaults: dict,
     force: bool = False,
     workers: int = 4,
+    reasoning_for: dict[str, dict | None] | None = None,
 ) -> dict:
     """Execute the requested prompt x model matrix. Returns a summary dict."""
     # Build the worklist, skipping pairs that already have a successful response.
@@ -45,6 +46,8 @@ def run(
     temperature = defaults.get("temperature", 0.7)
     max_tokens = defaults.get("max_tokens", 2048)
 
+    reasoning_for = reasoning_for or {}
+
     def work(job: tuple[Prompt, str]):
         p, m = job
         try:
@@ -54,6 +57,7 @@ def run(
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                reasoning=reasoning_for.get(m),
             )
             return job, res, None
         except OpenRouterError as e:
@@ -95,8 +99,14 @@ def run(
                     finish_reason=res.finish_reason,
                     error=None,
                     raw_json=json.dumps(res.raw),
+                    reasoning_tokens=res.reasoning_tokens,
+                    reasoning=res.reasoning_text or None,
+                    reasoning_config=json.dumps(reasoning_for.get(m))
+                    if reasoning_for.get(m) is not None
+                    else None,
                 )
-                _progress(done, total, f"ok   {p.id} :: {m} ({res.latency_ms} ms)")
+                think = "" if res.reasoning_tokens is None else f", {res.reasoning_tokens} think"
+                _progress(done, total, f"ok   {p.id} :: {m} ({res.latency_ms} ms{think})")
 
     print(f"\nDone. {ok} ok, {errors} error(s), {skipped} skipped.")
     return {"ok": ok, "errors": errors, "skipped": skipped}

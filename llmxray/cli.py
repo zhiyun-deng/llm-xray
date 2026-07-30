@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import tempfile
 
-from . import db, views
+from . import db, reasoning as reasoning_mod, views
 from .catalog import CATALOG_PATH, write_catalog
-from .config import VIEWS_DIR, get_api_key, load_config
+from .config import REASONING_EFFORTS, VIEWS_DIR, get_api_key, load_config, resolve_reasoning
 from .openrouter import OpenRouterClient
 from .prompts import load_prompt_map, parse_prompts
 from .runner import run as run_matrix
@@ -29,6 +30,44 @@ def _select_models(cfg: dict, requested: list[str] | None) -> list[str]:
     if not models:
         raise SystemExit("No models configured. Add some to config.json or pass --models.")
     return models
+
+
+def _reasoning_from_args(args) -> dict | None:
+    """Build a reasoning override from CLI flags, or None if none were given.
+
+    Returns the sentinel {} for --no-reasoning-override so callers can tell
+    "user asked for config defaults" from "user asked for nothing".
+    """
+    if getattr(args, "no_reasoning", False):
+        return {"effort": "none"}
+    override: dict = {}
+    if getattr(args, "reasoning_effort", None):
+        override["effort"] = args.reasoning_effort
+    if getattr(args, "reasoning_max_tokens", None):
+        override["max_tokens"] = args.reasoning_max_tokens
+    if getattr(args, "reasoning", False) and not override:
+        override["enabled"] = True
+    if getattr(args, "hide_reasoning", False):
+        override["exclude"] = True
+    return override or None
+
+
+def _reasoning_map(cfg: dict, models: list[str], args) -> dict[str, dict | None]:
+    """Resolve the reasoning object per model: CLI flags beat config."""
+    override = _reasoning_from_args(args)
+    if override is not None:
+        return {m: override for m in models}
+    return {m: resolve_reasoning(cfg, m) for m in models}
+
+
+def _describe_reasoning(mapping: dict[str, dict | None]) -> None:
+    shown = {m: v for m, v in mapping.items() if v is not None}
+    if not shown:
+        print("Reasoning: sending no reasoning parameter (each model uses its own default).")
+        return
+    print("Reasoning per model:")
+    for m, v in mapping.items():
+        print(f"  {m}: {json.dumps(v) if v is not None else 'model default (nothing sent)'}")
 
 
 def _select_prompts(requested: list[str] | None):
@@ -63,12 +102,45 @@ def cmd_run(args) -> int:
     )
     workers = args.workers or cfg["run"].get("workers", 4)
 
+    reasoning_for = _reasoning_map(cfg, models, args)
+    _describe_reasoning(reasoning_for)
+
     conn = db.connect()
     summary = run_matrix(
         conn, client, prompts, models, cfg["defaults"],
-        force=args.force, workers=workers,
+        force=args.force, workers=workers, reasoning_for=reasoning_for,
     )
     return 1 if summary["errors"] else 0
+
+
+def cmd_probe(args) -> int:
+    """Find out empirically whether each model reasons, and if it can be toggled."""
+    cfg = load_config()
+    models = _select_models(cfg, _split_csv(args.models))
+    arms = _split_csv(args.arms) or ["default", "on", "off"]
+    unknown = [a for a in arms if a not in reasoning_mod.ARMS]
+    if unknown:
+        raise SystemExit(
+            f"Unknown arm(s): {', '.join(unknown)}. "
+            f"Choose from: {', '.join(reasoning_mod.ARMS)}"
+        )
+
+    client = OpenRouterClient(
+        api_key=get_api_key(),
+        base_url=cfg["openrouter"]["base_url"],
+        referer=cfg["openrouter"]["referer"],
+        title=cfg["openrouter"]["title"],
+        timeout=cfg["run"].get("timeout_seconds", 120),
+        max_retries=cfg["run"].get("max_retries", 4),
+    )
+
+    print(f"Probing {len(models)} model(s) x {len(arms)} arm(s) = "
+          f"{len(models) * len(arms)} call(s). This spends real credit.\n")
+    results = reasoning_mod.probe(
+        client, models, arms, max_tokens=args.max_tokens, workers=args.workers or 5
+    )
+    print(reasoning_mod.format_table(results, arms))
+    return 0
 
 
 def cmd_add(args) -> int:
@@ -226,6 +298,31 @@ def cmd_catalog(args) -> int:
 # parser
 # --------------------------------------------------------------------------- #
 
+def _add_reasoning_flags(p: argparse.ArgumentParser) -> None:
+    """Reasoning controls shared by commands that make chat calls."""
+    g = p.add_argument_group("reasoning")
+    g.add_argument(
+        "--reasoning", action="store_true",
+        help="Turn thinking on at the provider default effort.",
+    )
+    g.add_argument(
+        "--reasoning-effort", choices=REASONING_EFFORTS,
+        help="Effort level (OpenAI/Grok-style). 'none' asks for no thinking.",
+    )
+    g.add_argument(
+        "--reasoning-max-tokens", type=int,
+        help="Thinking token budget (Anthropic/Gemini-style). Anthropic min 1024.",
+    )
+    g.add_argument(
+        "--no-reasoning", action="store_true",
+        help="Ask for no thinking (effort=none). Some models ignore this.",
+    )
+    g.add_argument(
+        "--hide-reasoning", action="store_true",
+        help="Still reason, but don't return the trace (billed the same).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="llmxray",
@@ -239,7 +336,27 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--force", action="store_true", help="Re-run pairs that already exist.")
     pr.add_argument("--workers", type=int, help="Concurrent requests.")
     pr.add_argument("--limit", type=int, help="Only the first N prompts (handy for a test run).")
+    _add_reasoning_flags(pr)
     pr.set_defaults(func=cmd_run)
+
+    pb = sub.add_parser(
+        "probe",
+        help="Test whether each model reasons by default, and if it can be toggled.",
+    )
+    pb.add_argument("--models", help="Comma-separated models (default: config.json).")
+    pb.add_argument(
+        "--arms",
+        help="Which arms to run, comma-separated: default,on,off (default: all three).",
+    )
+    pb.add_argument(
+        "--max-tokens", type=int, default=reasoning_mod.DEFAULT_PROBE_MAX_TOKENS,
+        help=(
+            f"Output cap per probe call (default {reasoning_mod.DEFAULT_PROBE_MAX_TOKENS}). "
+            "Must leave room for thinking and an answer."
+        ),
+    )
+    pb.add_argument("--workers", type=int, help="Models probed in parallel (default 5).")
+    pb.set_defaults(func=cmd_probe)
 
     pa = sub.add_parser("add", help="Store a manually-collected response.")
     pa.add_argument("--prompt", required=True, help="Prompt id.")

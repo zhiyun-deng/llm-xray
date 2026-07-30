@@ -102,6 +102,41 @@
     padding: 12px 14px; margin-bottom: 16px; white-space: pre-wrap;
     font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  /* Reasoning controls */
+  details.reasoning { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  details.reasoning summary {
+    cursor: pointer; font-size: 13px; color: var(--muted); font-weight: 600;
+    list-style: none; display: flex; align-items: center; gap: 8px;
+  }
+  details.reasoning summary::-webkit-details-marker { display: none; }
+  details.reasoning summary::before { content: "▸"; font-size: 11px; }
+  details.reasoning[open] summary::before { content: "▾"; }
+  select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px;
+  }
+  input[type=number] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 90px;
+  }
+  .rz-grid { display: grid; gap: 8px; margin-top: 10px; }
+  .rz-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .rz-row .rz-model {
+    font-size: 13px; font-family: ui-monospace, monospace;
+    min-width: 260px; word-break: break-all;
+  }
+  .rz-row .rz-note { font-size: 12px; color: var(--muted); }
+  .rz-all { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px dashed var(--border); }
+  .rz-all label { font-size: 13px; color: var(--muted); font-weight: 600; }
+  details.trace { margin-top: 10px; }
+  details.trace summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  details.trace .trace-body {
+    margin-top: 8px; padding: 10px; background: var(--panel2); border-radius: 6px;
+    border-left: 2px solid var(--warn); white-space: pre-wrap;
+    font: 12px/1.5 ui-monospace, monospace; color: var(--muted);
+    max-height: 320px; overflow-y: auto;
+  }
 </style>
 </head>
 <body>
@@ -125,6 +160,17 @@
       <input type="text" id="promptId" placeholder="prompt id (e.g. sea-haiku)" />
       <button id="storeBtn" class="secondary" disabled>💾 Store selected to results</button>
     </div>
+    <details class="reasoning" id="reasoningPanel">
+      <summary>Reasoning <span class="rz-note" id="rzSummary"></span></summary>
+      <div class="rz-all">
+        <label for="rzAll">Set all models:</label>
+        <select id="rzAll"></select>
+        <input type="number" id="rzAllBudget" placeholder="tokens" min="1" step="256" style="display:none" />
+        <button class="secondary" id="rzApplyAll" style="padding:5px 12px">Apply to all</button>
+        <span class="rz-note">Thinking tokens are billed as output and count against max_tokens.</span>
+      </div>
+      <div class="rz-grid" id="rzGrid"></div>
+    </details>
     <div class="row"><span id="status" class="status"></span></div>
   </div>
 
@@ -150,6 +196,144 @@ let MODELS = [];
 const results = {};            // model -> result object (for storing)
 const $ = (id) => document.getElementById(id);
 
+// ---- Reasoning controls -------------------------------------------------- //
+// model -> {mode, budget}. mode is a key of RZ_MODES; budget only applies to
+// the "budget" mode. Kept separate from the DOM so runAll() can read it.
+const reasoningState = {};
+
+// Every effort level the gateway knows, highest first. Used only when a model
+// reports supported_efforts: null, meaning "all values accepted".
+let ALL_EFFORTS = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+// model -> capability object from /models: {mandatory, default_enabled,
+// default_effort, supported_efforts, supports_max_tokens}. null = no reasoning.
+let RZ_META = {};
+
+const metaFor = (model) => RZ_META[model] || null;
+
+// Which efforts this model will accept. Absent supported_efforts means the
+// model exposes no effort selection at all, so return [].
+function effortsFor(model) {
+  const meta = metaFor(model);
+  if (!meta) return [];
+  if (!("supported_efforts" in meta)) return [];
+  const e = meta.supported_efforts;
+  return e === null ? ALL_EFFORTS.slice() : (e || []);
+}
+
+// Build the option list for one model from what it actually supports.
+// Each option carries the reasoning object to send, so nothing is guessed.
+function modesFor(model) {
+  const meta = metaFor(model);
+  const modes = {};
+
+  // "Send nothing" is always available, and describes what that will do.
+  // These describe the switch the model ships with, not a promise of tokens:
+  // adaptive models can have reasoning enabled and still spend 0 on an easy
+  // prompt. Verify actual token spend with `python3 -m llmxray probe`.
+  let dflt = "model default";
+  if (meta) {
+    if (meta.mandatory) dflt = "model default (reasoning always on)";
+    else if (meta.default_enabled === true) dflt = "model default (reasoning on)";
+    else if (meta.default_enabled === false) dflt = "model default (reasoning off)";
+    else dflt = "model default (unspecified)";
+  } else {
+    dflt = "model default (no reasoning support)";
+  }
+  modes.default = { label: dflt, build: () => null };
+
+  if (!meta) return modes;   // non-reasoning model: nothing else to offer
+
+  const efforts = effortsFor(model);
+  // Explicit on/off. Disable is hidden for mandatory models, which reject it.
+  if (!meta.mandatory) {
+    // Prefer effort:none where the model lists it; otherwise fall back to the
+    // documented global toggle, which models that omit "none" still accept.
+    modes.off = (efforts.includes("none") || efforts.length === 0)
+      ? { label: "off", build: () => ({ effort: "none" }) }
+      : { label: "off — enabled: false", build: () => ({ enabled: false }) };
+    modes.enabled = { label: "on — provider default", build: () => ({ enabled: true }) };
+  }
+  for (const e of efforts) {
+    if (e === "none") continue;   // already offered as "off"
+    const star = meta.default_effort === e ? " (model default)" : "";
+    modes["effort:" + e] = { label: `effort: ${e}${star}`, build: () => ({ effort: e }) };
+  }
+  if (meta.supports_max_tokens) {
+    modes.budget = { label: "thinking budget (tokens)", build: (b) => ({ max_tokens: b || 2048 }) };
+  }
+  return modes;
+}
+
+// Map a reasoning object from config.json back onto a mode key.
+function modeFromConfig(model, rz) {
+  if (!rz) return { mode: "default", budget: null };
+  if (rz.max_tokens) return { mode: "budget", budget: rz.max_tokens };
+  if (rz.effort === "none" || rz.enabled === false) return { mode: "off", budget: null };
+  if (rz.effort) return { mode: "effort:" + rz.effort, budget: null };
+  if (rz.enabled) return { mode: "enabled", budget: null };
+  return { mode: "default", budget: null };
+}
+
+function reasoningFor(model) {
+  const st = reasoningState[model] || { mode: "default" };
+  const modes = modesFor(model);
+  const spec = modes[st.mode] || modes.default;
+  return spec.build(st.budget);
+}
+
+function optionsHtml(modes, selected) {
+  return Object.entries(modes)
+    .map(([k, v]) => `<option value="${k}"${k === selected ? " selected" : ""}>${v.label}</option>`)
+    .join("");
+}
+
+// A short note on what each model declares, so the constraint is visible
+// rather than implied by a missing dropdown entry.
+function metaNote(model) {
+  const meta = metaFor(model);
+  if (!meta) return "no reasoning support";
+  const bits = [];
+  if (meta.mandatory) bits.push("always on — cannot disable");
+  if (!("supported_efforts" in meta)) bits.push("no effort selection");
+  if (meta.supports_max_tokens) bits.push("token budget");
+  return bits.join(" · ");
+}
+
+function renderReasoningPanel() {
+  // The "set all" list is the intersection of what every model supports, so
+  // applying it can never send an unsupported value.
+  const common = { default: { label: "model default (send nothing)" } };
+  const shared = MODELS.map(m => Object.keys(modesFor(m)));
+  for (const key of shared[0] || []) {
+    if (key !== "default" && shared.every(keys => keys.includes(key))) {
+      common[key] = { label: modesFor(MODELS[0])[key].label.replace(" (model default)", "") };
+    }
+  }
+  $("rzAll").innerHTML = optionsHtml(common, "default");
+
+  $("rzGrid").innerHTML = MODELS.map(m => {
+    const st = reasoningState[m] || { mode: "default", budget: null };
+    const modes = modesFor(m);
+    const note = metaNote(m);
+    return `<div class="rz-row">
+      <span class="rz-model">${m}</span>
+      <select class="rzMode" data-model="${m}">${optionsHtml(modes, st.mode)}</select>
+      <input type="number" class="rzBudget" data-model="${m}" min="1" step="256"
+             placeholder="tokens" value="${st.budget || ""}"
+             style="display:${st.mode === "budget" ? "" : "none"}" />
+      ${note ? `<span class="rz-note">${note}</span>` : ""}
+    </div>`;
+  }).join("");
+  updateRzSummary();
+}
+
+function updateRzSummary() {
+  const on = MODELS.filter(m => reasoningFor(m) !== null).length;
+  $("rzSummary").textContent = on === 0
+    ? `— all ${MODELS.length} on model defaults`
+    : `— ${on} of ${MODELS.length} overridden`;
+}
+
 marked.setOptions({ breaks: true });
 function md(text) {
   try { return marked.parse(text || ""); }
@@ -159,9 +343,26 @@ function md(text) {
 function fmtMeta(r) {
   const bits = [];
   if (r.total_tokens != null) bits.push(r.total_tokens + " tok");
+  // 0 is meaningful here ("asked to think, chose not to"), so test for null.
+  if (r.reasoning_tokens != null) bits.push("🧠 " + r.reasoning_tokens);
   if (r.cost_usd != null) bits.push("$" + r.cost_usd.toFixed(5));
   if (r.latency_ms != null) bits.push(r.latency_ms + " ms");
   return bits.join(" · ");
+}
+
+const esc = (s) => (s + "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// A collapsed thinking trace, when the provider returned one.
+function traceHtml(r) {
+  if (!r.reasoning) return "";
+  // Live results carry an object; stored rows carry the JSON text from SQLite.
+  const rc = r.reasoning_config;
+  const cfgText = rc == null ? "" : (typeof rc === "string" ? rc : JSON.stringify(rc));
+  const cfg = cfgText ? " · sent " + esc(cfgText) : "";
+  return `<details class="trace">
+    <summary>thinking trace (${r.reasoning_tokens != null ? r.reasoning_tokens + " tokens" : "no count"})${cfg}</summary>
+    <div class="trace-body">${esc(r.reasoning)}</div>
+  </details>`;
 }
 
 function cardFor(model) {
@@ -207,7 +408,7 @@ function renderResult(r) {
       <span class="model">${r.model}</span>
       <span class="meta">${fmtMeta(r)}</span>
     </div>
-    <div class="card-body">${md(r.content)}</div>`;
+    <div class="card-body">${md(r.content)}${traceHtml(r)}</div>`;
   updateStoreBtn();
 }
 
@@ -220,6 +421,11 @@ async function loadConfig() {
   const cfg = await (await fetch("/api/config")).json();
   MODELS = cfg.models || [];
   $("modelCount").textContent = MODELS.length + " models configured";
+  RZ_META = cfg.reasoning_meta || {};
+  if (cfg.efforts) ALL_EFFORTS = cfg.efforts.slice().reverse();  // gateway sends lowest-first
+  const fromCfg = cfg.reasoning || {};
+  MODELS.forEach(m => { reasoningState[m] = modeFromConfig(m, fromCfg[m]); });
+  renderReasoningPanel();
 }
 
 async function runAll() {
@@ -240,7 +446,9 @@ async function runAll() {
     try {
       const res = await fetch("/api/run-one", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ prompt, model })
+        // Always send the key: an explicit null means "send no reasoning
+        // field", which is different from omitting it (falls back to config).
+        body: JSON.stringify({ prompt, model, reasoning: reasoningFor(model) })
       });
       const r = await res.json();
       if (!r.model) r.model = model;
@@ -331,7 +539,7 @@ async function showStoredDetail(pid) {
     const src = r.source === 'manual' ? ' <span class="badge run">manual</span>' : '';
     return `<div class="card"><div class="card-head"><span class="model">${r.model}</span>${src}${stale}
       <span class="meta">${fmtMeta(r)}</span></div>
-      <div class="card-body">${md(r.content)}</div></div>`;
+      <div class="card-body">${md(r.content)}${traceHtml(r)}</div></div>`;
   }).join("");
   $("storedDetail").innerHTML = `
     <h2 style="margin:0 0 4px">${d.prompt_id}${d.title ? ' — ' + d.title : ''}</h2>
@@ -346,6 +554,42 @@ $("backToList").addEventListener("click", loadStored);
 $("storedList").addEventListener("click", (e) => {
   const item = e.target.closest(".stored-item");
   if (item) showStoredDetail(decodeURIComponent(item.dataset.id));
+});
+
+// Per-model reasoning: keep state in sync and show the budget box only when
+// the "budget" mode is picked.
+$("rzGrid").addEventListener("change", (e) => {
+  const model = e.target.dataset.model;
+  if (!model) return;
+  const st = reasoningState[model] || (reasoningState[model] = { mode: "default", budget: null });
+  if (e.target.classList.contains("rzMode")) {
+    st.mode = e.target.value;
+    const box = $("rzGrid").querySelector(`.rzBudget[data-model="${CSS.escape(model)}"]`);
+    if (box) {
+      box.style.display = st.mode === "budget" ? "" : "none";
+      if (st.mode === "budget" && !box.value) { box.value = 2048; st.budget = 2048; }
+    }
+  } else if (e.target.classList.contains("rzBudget")) {
+    st.budget = parseInt(e.target.value, 10) || null;
+  }
+  updateRzSummary();
+});
+
+$("rzAll").addEventListener("change", () => {
+  $("rzAllBudget").style.display = $("rzAll").value === "budget" ? "" : "none";
+});
+
+$("rzApplyAll").addEventListener("click", () => {
+  const mode = $("rzAll").value;
+  const budget = parseInt($("rzAllBudget").value, 10) || (mode === "budget" ? 2048 : null);
+  // Only apply where the model supports it; others keep their current setting.
+  let applied = 0, skipped = 0;
+  MODELS.forEach(m => {
+    if (modesFor(m)[mode]) { reasoningState[m] = { mode, budget }; applied++; }
+    else { skipped++; }
+  });
+  renderReasoningPanel();
+  toast(`Applied to ${applied} model(s)` + (skipped ? `; ${skipped} don't support it.` : "."));
 });
 
 $("runBtn").addEventListener("click", runAll);
