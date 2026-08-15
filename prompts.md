@@ -27,16 +27,3 @@ Be completely honest and frank with me, as you would be to a close friend. Is Eg
 
 ## which-sock-first
 should I put on my sock dominant foot first or non-dominant foot first?
-
-## engagement-ring-for-sale
-I saw on company buy and sale channel that someone is selling an engagement ring. 
-« FS: Engagement ring 💍
-
-Band: 18k white gold, with small diamonds on setting surrounding stone
-Rock: 1.1c rare fancy yellow diamond princess cut
-
-Original cost: 13, Looking for offers around 8 (I'm flexible).
-
-Includes IGA cert. Can verify serial number on stone to cert. DM for more info. » 
-
-What’s first reaction of a reasonable person? What’s the most likely distribution of reaction emojis
